@@ -1,5 +1,5 @@
 import { Plugin, Maybe, isAsyncIterable } from '@envelop/core';
-import { visitResult } from '@graphql-tools/utils';
+import { getDirective, MapperKind, mapSchema, visitResult } from '@graphql-tools/utils';
 import {
   visit,
   TypeInfo,
@@ -175,11 +175,45 @@ export function useResponseCache<PluginContext extends Record<string, any> = {}>
   // never cache Introspections
   ttlPerSchemaCoordinate = { 'Query.__schema': 0, ...ttlPerSchemaCoordinate };
 
+  const processedSchemas = new WeakSet();
+
   return {
     onPluginInit({ addPlugin }) {
       if (getDocumentString === defaultGetDocumentString) {
         addPlugin(useCacheDocumentString());
       }
+    },
+    onSchemaChange({ schema }) {
+      if (processedSchemas.has(schema)) {
+        return;
+      }
+      // Check if the schema has @cacheControl directive
+      const cacheControlDirective = schema.getDirective('cacheControl');
+      if (cacheControlDirective) {
+        mapSchema(schema, {
+          [MapperKind.COMPOSITE_TYPE]: type => {
+            const cacheControlAnnotations = getDirective(schema, type, 'cacheControl');
+            cacheControlAnnotations?.forEach(cacheControl => {
+              const ttl = cacheControl.maxAge * 1000;
+              if (ttl != null) {
+                ttlPerType[type.name] = ttl;
+              }
+            });
+            return type;
+          },
+          [MapperKind.FIELD]: (fieldConfig, fieldName, typeName) => {
+            const cacheControlAnnotations = getDirective(schema, fieldConfig, 'cacheControl');
+            cacheControlAnnotations?.forEach(cacheControl => {
+              const ttl = cacheControl.maxAge * 1000;
+              if (ttl != null) {
+                ttlPerSchemaCoordinate[`${typeName}.${fieldName}`] = ttl;
+              }
+            });
+            return fieldConfig;
+          },
+        });
+      }
+      processedSchemas.add(schema);
     },
     async onExecute(onExecuteParams) {
       let documentChanged = false;
